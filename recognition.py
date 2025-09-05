@@ -1,80 +1,268 @@
 import cv2
 import face_recognition
+import mysql.connector
 import os
+import io
+import numpy as np
+import sys
 
-# Create a path to the directory containing your script and image
-script_dir = os.path.dirname(os.path.abspath(__file__))
+# --- Database Configuration ---
+DB_CONFIG = {
+    "host": "localhost",
+    "user": "root",
+    "password": "",  # Default XAMPP password is an empty string
+    "database": "project",
+}
 
-# Define the path to your known face image
-known_image_path = os.path.join(script_dir, "my_face.jpg")
 
-# Load the known face image and get its face encoding
-print("Loading known face image...")
-try:
-    known_image = face_recognition.load_image_file(known_image_path)
-    known_face_encoding = face_recognition.face_encodings(known_image)[0]
-    known_face_encodings = [known_face_encoding]
-    print("Known face encoding created.")
-except IndexError:
-    print(
-        f"Error: No face found in {known_image_path}. Please ensure a clear face is visible."
-    )
-    exit()
-except FileNotFoundError:
-    print(
-        f"Error: The file '{known_image_path}' was not found. Please ensure it's in the same directory as the script."
-    )
-    exit()
+def get_known_faces_from_db():
+    """
+    Fetches all names and face encodings from the database.
+    Returns a tuple of two lists: known_names and known_encodings.
+    """
+    known_names = []
+    known_encodings = []
 
-# Open webcam
+    try:
+        # Connect to the database
+        db_connection = mysql.connector.connect(**DB_CONFIG)
+        cursor = db_connection.cursor()
+        print("Connected to the database successfully.")
+
+        # Execute the query to get names and encodings
+        cursor.execute("SELECT name, encoding FROM known_faces")
+
+        # Fetch all results
+        results = cursor.fetchall()
+        print(f"Found {len(results)} known faces in the database.")
+
+        # Process the results
+        for row in results:
+            name, encoding_blob = row
+            # Convert the BLOB (bytes) back to a numpy array
+            encoding_array = np.load(io.BytesIO(encoding_blob))
+            known_names.append(name)
+            known_encodings.append(encoding_array)
+
+    except mysql.connector.Error as err:
+        print(f"Database error: {err}")
+    finally:
+        # Close the connection
+        if "db_connection" in locals() and db_connection.is_connected():
+            cursor.close()
+            db_connection.close()
+
+    return known_names, known_encodings
+
+
+def add_face_to_db(name, encoding):
+    """
+    Adds a new name and face encoding to the database.
+    """
+    try:
+        db_connection = mysql.connector.connect(**DB_CONFIG)
+        cursor = db_connection.cursor()
+
+        # Convert the numpy array encoding to bytes for storage
+        bio = io.BytesIO()
+        np.save(bio, encoding)
+        encoding_blob = bio.getvalue()
+
+        sql = "INSERT INTO known_faces (name, encoding) VALUES (%s, %s)"
+        values = (name, encoding_blob)
+        cursor.execute(sql, values)
+        db_connection.commit()
+        print(f"Successfully added '{name}' to the database.")
+
+    except mysql.connector.Error as err:
+        print(f"Database error: {err}")
+        db_connection.rollback()
+    finally:
+        if "db_connection" in locals() and db_connection.is_connected():
+            cursor.close()
+            db_connection.close()
+
+
+def handle_add_new_face():
+    """
+    Handles the user interaction for adding a new face,
+    including capturing from a webcam or uploading a file.
+    """
+    # Get user input for new face
+    name = input("Enter the name of the person you want to add: ")
+
+    # Get user choice for image source
+    while True:
+        source_choice = input(
+            "Choose a method to get the image: [1] Upload from file, [2] Take a picture now: "
+        )
+        if source_choice in ("1", "2"):
+            break
+        else:
+            print("Invalid choice. Please enter '1' or '2'.")
+
+    face_encoding = None
+
+    if source_choice == "1":
+        while True:
+            image_path = input("Enter the full path to the image file: ")
+            if not os.path.exists(image_path):
+                print(
+                    f"Error: The file '{image_path}' was not found. Please try again."
+                )
+                continue
+            try:
+                print("Loading image...")
+                known_image = face_recognition.load_image_file(image_path)
+                encodings = face_recognition.face_encodings(known_image)
+                if not encodings:
+                    print(
+                        "Error: No face found in the image. Please try another image."
+                    )
+                else:
+                    face_encoding = encodings[0]
+                    break
+            except Exception as e:
+                print(f"An error occurred: {e}")
+
+    elif source_choice == "2":
+        print(
+            "\nOpening webcam. Please look at the camera and press 's' to capture your face."
+        )
+        video_capture = cv2.VideoCapture(0)
+        if not video_capture.isOpened():
+            print("Error: Could not open webcam.")
+            return False
+
+        while True:
+            ret, frame = video_capture.read()
+            if not ret:
+                print("Error: Could not read frame from webcam.")
+                break
+
+            # Find faces in the current frame
+            face_locations = face_recognition.face_locations(frame)
+            if face_locations:
+                cv2.rectangle(
+                    frame,
+                    (face_locations[0][3], face_locations[0][0]),
+                    (face_locations[0][1], face_locations[0][2]),
+                    (0, 255, 0),
+                    2,
+                )
+                cv2.putText(
+                    frame,
+                    "Face Detected",
+                    (face_locations[0][3], face_locations[0][0] - 10),
+                    cv2.FONT_HERSHEY_DUPLEX,
+                    0.5,
+                    (0, 255, 0),
+                    1,
+                )
+            else:
+                cv2.putText(
+                    frame,
+                    "No Face Detected",
+                    (50, 50),
+                    cv2.FONT_HERSHEY_DUPLEX,
+                    1,
+                    (0, 0, 255),
+                    2,
+                )
+
+            cv2.imshow("Capture Face", frame)
+
+            key = cv2.waitKey(1) & 0xFF
+            if key == ord("s"):
+                if face_locations:
+                    print("Capturing face...")
+                    face_encoding = face_recognition.face_encodings(
+                        frame, face_locations
+                    )[0]
+                    video_capture.release()
+                    cv2.destroyAllWindows()
+                    break
+                else:
+                    print("No face detected. Please try again.")
+            elif key == ord("q"):
+                print("Capture cancelled.")
+                video_capture.release()
+                cv2.destroyAllWindows()
+                return False
+
+    if face_encoding is not None:
+        add_face_to_db(name, face_encoding)
+        return True
+    return False
+
+
+# --- Main Program Logic ---
+known_names, known_face_encodings = get_known_faces_from_db()
+
+# Main menu loop
+while True:
+    print("\n--- Menu ---")
+    print("1. Add a new face")
+    print("2. Start face recognition")
+    print("q. Quit")
+
+    choice = input("Enter your choice: ")
+
+    if choice == "1":
+        if handle_add_new_face():
+            # Reload faces from the database to include the new one
+            known_names, known_face_encodings = get_known_faces_from_db()
+    elif choice == "2":
+        if not known_face_encodings:
+            print(
+                "Database is empty. Please add at least one face before starting recognition."
+            )
+        else:
+            break  # Break out of the menu loop to start the recognition loop
+    elif choice == "q":
+        sys.exit("Program terminated by user.")
+    else:
+        print("Invalid choice. Please try again.")
+
+# --- Face Recognition Loop ---
+print("\nStarting face recognition. Press 'q' to quit.")
 video_capture = cv2.VideoCapture(0)
 
-print("Press 'q' to quit.")
+if not video_capture.isOpened():
+    sys.exit("Error: Could not open webcam.")
 
 while True:
-    # Grab a single frame of video
     ret, frame = video_capture.read()
-
-    # Check if the frame was captured successfully
     if not ret:
         print("Error: Could not read frame from webcam.")
         break
 
-    # Find all the faces and face encodings in the current frame of video
+    # Find faces and encodings in the current frame
     face_locations = face_recognition.face_locations(frame)
     face_encodings = face_recognition.face_encodings(frame, face_locations)
 
-    # Loop through each face found in the frame
     for (top, right, bottom, left), face_encoding in zip(
         face_locations, face_encodings
     ):
-
-        # Compare the current face encoding with the known face encoding
-        matches = face_recognition.compare_faces(known_face_encodings, face_encoding)
-
         name = "Unknown Person"
-
-        # If a match is found, use the known person's name
+        # Compare current face with known faces
+        matches = face_recognition.compare_faces(known_face_encodings, face_encoding)
         if True in matches:
-            name = "FA22-BCS-093"  # You can replace this with your name
+            first_match_index = matches.index(True)
+            name = known_names[first_match_index]
 
         # Draw a box around the face
         cv2.rectangle(frame, (left, top), (right, bottom), (0, 0, 255), 2)
-
-        # Draw a label with a name below the face
         cv2.rectangle(
             frame, (left, bottom - 35), (right, bottom), (0, 0, 255), cv2.FILLED
         )
         font = cv2.FONT_HERSHEY_DUPLEX
         cv2.putText(frame, name, (left + 6, bottom - 6), font, 1.0, (255, 255, 255), 1)
 
-    # Display the resulting image
     cv2.imshow("Video", frame)
 
-    # Hit 'q' on the keyboard to quit!
     if cv2.waitKey(1) & 0xFF == ord("q"):
         break
 
-# Release handle to the webcam
 video_capture.release()
 cv2.destroyAllWindows()
