@@ -1,0 +1,14 @@
+# Ignore Python virtual environments
+my_env_310/
+
+# Byte-compiled / cache files
+__pycache__/
+*.pyc
+*.pyo
+
+# OS junk files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
