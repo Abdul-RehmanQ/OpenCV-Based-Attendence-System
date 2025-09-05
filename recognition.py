@@ -55,21 +55,22 @@ def get_known_faces_from_db():
     return known_names, known_encodings
 
 
-def add_face_to_db(name, encoding):
+def add_face_to_db(name, encoding, image_data):
     """
-    Adds a new name and face encoding to the database.
+    Adds a new name, face encoding, and image to the database.
     """
     try:
         db_connection = mysql.connector.connect(**DB_CONFIG)
         cursor = db_connection.cursor()
 
         # Convert the numpy array encoding to bytes for storage
-        bio = io.BytesIO()
-        np.save(bio, encoding)
-        encoding_blob = bio.getvalue()
+        bio_enc = io.BytesIO()
+        np.save(bio_enc, encoding)
+        encoding_blob = bio_enc.getvalue()
 
-        sql = "INSERT INTO known_faces (name, encoding) VALUES (%s, %s)"
-        values = (name, encoding_blob)
+        # The image_data is already in bytes
+        sql = "INSERT INTO known_faces (name, encoding, image) VALUES (%s, %s, %s)"
+        values = (name, encoding_blob, image_data)
         cursor.execute(sql, values)
         db_connection.commit()
         print(f"Successfully added '{name}' to the database.")
@@ -102,6 +103,7 @@ def handle_add_new_face():
             print("Invalid choice. Please enter '1' or '2'.")
 
     face_encoding = None
+    image_data = None
 
     if source_choice == "1":
         while True:
@@ -113,6 +115,10 @@ def handle_add_new_face():
                 continue
             try:
                 print("Loading image...")
+                # Read the image as binary data
+                with open(image_path, "rb") as f:
+                    image_data = f.read()
+
                 known_image = face_recognition.load_image_file(image_path)
                 encodings = face_recognition.face_encodings(known_image)
                 if not encodings:
@@ -179,6 +185,9 @@ def handle_add_new_face():
                     face_encoding = face_recognition.face_encodings(
                         frame, face_locations
                     )[0]
+                    # Convert the frame to a binary format (JPEG) for storage
+                    ret_enc, frame_enc = cv2.imencode(".jpg", frame)
+                    image_data = frame_enc.tobytes()
                     video_capture.release()
                     cv2.destroyAllWindows()
                     break
@@ -191,7 +200,7 @@ def handle_add_new_face():
                 return False
 
     if face_encoding is not None:
-        add_face_to_db(name, face_encoding)
+        add_face_to_db(name, face_encoding, image_data)
         return True
     return False
 
@@ -247,6 +256,8 @@ while True:
         name = "Unknown Person"
         # Compare current face with known faces
         matches = face_recognition.compare_faces(known_face_encodings, face_encoding)
+
+        # Find the best match
         if True in matches:
             first_match_index = matches.index(True)
             name = known_names[first_match_index]
