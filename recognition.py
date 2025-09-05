@@ -240,19 +240,37 @@ video_capture = cv2.VideoCapture(0)
 if not video_capture.isOpened():
     sys.exit("Error: Could not open webcam.")
 
+# Initialize variables for performance optimization
+process_this_frame = True
+
 while True:
     ret, frame = video_capture.read()
     if not ret:
         print("Error: Could not read frame from webcam.")
         break
 
-    # Find faces and encodings in the current frame
-    face_locations = face_recognition.face_locations(frame)
-    face_encodings = face_recognition.face_encodings(frame, face_locations)
+    # Resize frame for faster face recognition processing
+    if process_this_frame:
+        small_frame = cv2.resize(frame, (0, 0), fx=0.25, fy=0.25)
+        # Convert the image from BGR color (which OpenCV uses) to RGB color (which face_recognition uses)
+        rgb_small_frame = cv2.cvtColor(small_frame, cv2.COLOR_BGR2RGB)
 
+        # Find all the faces and face encodings in the current frame of video
+        face_locations = face_recognition.face_locations(rgb_small_frame)
+        face_encodings = face_recognition.face_encodings(
+            rgb_small_frame, face_locations
+        )
+
+    # Display the results
     for (top, right, bottom, left), face_encoding in zip(
         face_locations, face_encodings
     ):
+        # Scale back up face locations since the frame we detected in was scaled
+        top *= 4
+        right *= 4
+        bottom *= 4
+        left *= 4
+
         name = "Unknown Person"
         # Compare current face with known faces
         matches = face_recognition.compare_faces(known_face_encodings, face_encoding)
@@ -270,6 +288,10 @@ while True:
         font = cv2.FONT_HERSHEY_DUPLEX
         cv2.putText(frame, name, (left + 6, bottom - 6), font, 1.0, (255, 255, 255), 1)
 
+    # Toggle the frame processing flag
+    process_this_frame = not process_this_frame
+
+    # Display the resulting image
     cv2.imshow("Video", frame)
 
     if cv2.waitKey(1) & 0xFF == ord("q"):
