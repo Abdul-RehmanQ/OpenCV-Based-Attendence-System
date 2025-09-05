@@ -205,7 +205,6 @@ def handle_add_new_face():
     return False
 
 
-# --- Main Program Logic ---
 known_names, known_face_encodings = get_known_faces_from_db()
 
 # Main menu loop
