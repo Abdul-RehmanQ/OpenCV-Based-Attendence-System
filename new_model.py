@@ -18,7 +18,7 @@ DB_CONFIG = {
 }
 
 # --- Recognition Threshold for ArcFace (cosine similarity) ---
-RECOGNITION_THRESHOLD = 0.5
+RECOGNITION_THRESHOLD = 0.6
 
 # --- Load RetinaFace + ArcFace Model ---
 print("Loading RetinaFace + ArcFace model...")
