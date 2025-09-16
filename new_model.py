@@ -89,22 +89,21 @@ def list_students():
 
 
 def add_face_to_db(name, embedding, image_data, rollnumber=None):
-    """Add student + embedding to DB (create new if not exists)."""
+    """Add student + embedding to DB using provided roll number and name."""
     try:
         db_connection = mysql.connector.connect(**DB_CONFIG)
         cursor = db_connection.cursor()
 
-        if not rollnumber:
-            cursor.execute("SELECT rollnumber FROM students WHERE name = %s", (name,))
-            result = cursor.fetchone()
-            if result:
-                rollnumber = result[0]
-            else:
-                rollnumber = str(int(time.time()))
-                cursor.execute(
-                    "INSERT INTO students (rollnumber, name) VALUES (%s, %s)",
-                    (rollnumber, name),
-                )
+        # Insert student if not exists
+        cursor.execute(
+            "SELECT rollnumber FROM students WHERE rollnumber = %s", (rollnumber,)
+        )
+        result = cursor.fetchone()
+        if not result:
+            cursor.execute(
+                "INSERT INTO students (rollnumber, name) VALUES (%s, %s)",
+                (rollnumber, name),
+            )
 
         bio_enc = io.BytesIO()
         np.save(bio_enc, embedding)
@@ -114,7 +113,7 @@ def add_face_to_db(name, embedding, image_data, rollnumber=None):
         cursor.execute(sql, (rollnumber, image_data, encoding_blob))
 
         db_connection.commit()
-        print(f"Successfully added face for '{name}' (Roll No: {rollnumber}).")
+        print(f"✅ Successfully added face for '{name}' (Roll No: {rollnumber}).")
     except mysql.connector.Error as err:
         print(f"Database error: {err}")
         db_connection.rollback()
@@ -174,10 +173,28 @@ def extract_embedding(frame):
 
 
 def handle_add_new_face():
-    """Guide user to add student with images."""
+    """Guide user to add student with roll number and name."""
+    rollnumber = input("Enter the student's roll number (or q to quit): ")
+    if rollnumber.lower() == "q":
+        return False
+
     name = input("Enter the student's name (or q to quit): ")
     if name.lower() == "q":
         return False
+
+    # Check if roll number already exists
+    try:
+        db_connection = mysql.connector.connect(**DB_CONFIG)
+        cursor = db_connection.cursor()
+        cursor.execute("SELECT name FROM students WHERE rollnumber = %s", (rollnumber,))
+        result = cursor.fetchone()
+        if result:
+            print(f"❌ Roll number {rollnumber} already exists for {result[0]}.")
+            return False
+    finally:
+        if "db_connection" in locals() and db_connection.is_connected():
+            cursor.close()
+            db_connection.close()
 
     while True:
         source_choice = input("Choose method: [1] Upload file, [2] Webcam, [q] Quit: ")
@@ -221,8 +238,9 @@ def handle_add_new_face():
                     return False
             cap.release()
             cv2.destroyAllWindows()
+
         if embedding is not None:
-            add_face_to_db(name, embedding, image_data)
+            add_face_to_db(name, embedding, image_data, rollnumber=rollnumber)
     return True
 
 
