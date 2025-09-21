@@ -113,7 +113,7 @@ def add_face_to_db(name, embedding, image_data, rollnumber=None):
         cursor.execute(sql, (rollnumber, image_data, encoding_blob))
 
         db_connection.commit()
-        print(f"✅ Successfully added face for '{name}' (Roll No: {rollnumber}).")
+        print(f"Successfully added face for '{name}' (Roll No: {rollnumber}).")
     except mysql.connector.Error as err:
         print(f"Database error: {err}")
         db_connection.rollback()
@@ -189,7 +189,7 @@ def handle_add_new_face():
         cursor.execute("SELECT name FROM students WHERE rollnumber = %s", (rollnumber,))
         result = cursor.fetchone()
         if result:
-            print(f"❌ Roll number {rollnumber} already exists for {result[0]}.")
+            print(f" Roll number {rollnumber} already exists for {result[0]}.")
             return False
     finally:
         if "db_connection" in locals() and db_connection.is_connected():
