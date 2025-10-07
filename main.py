@@ -2,12 +2,13 @@ import cv2
 import os
 import numpy as np
 import sys
+import time
 import insightface
 import requests
 from urllib.parse import urlparse
 
 # --- Import DB functions ---
-from db import get_known_faces_from_db, list_students, add_face_to_db
+from db import get_known_faces_from_db, list_students, add_face_to_db, mark_attendance_automatic
 
 # --- Recognition Threshold for ArcFace (cosine similarity) ---
 RECOGNITION_THRESHOLD = 0.6
@@ -190,7 +191,7 @@ def add_images_for_existing_student():
 
 
 # ---------------- Main Program ---------------- #
-known_names, known_face_encodings = get_known_faces_from_db()
+known_names, known_face_encodings, known_rollnumbers = get_known_faces_from_db()
 
 while True:
     print("\n--- Menu ---")
@@ -203,7 +204,7 @@ while True:
 
     if choice == "1":
         if handle_add_new_face():
-            known_names, known_face_encodings = get_known_faces_from_db()
+            known_names, known_face_encodings, known_rollnumbers = get_known_faces_from_db()
     elif choice == "2":
         if not known_face_encodings:
             print("No student records found. Add at least one student first.")
@@ -213,7 +214,7 @@ while True:
         list_students()
     elif choice == "4":
         if add_images_for_existing_student():
-            known_names, known_face_encodings = get_known_faces_from_db()
+            known_names, known_face_encodings, known_rollnumbers = get_known_faces_from_db()
     elif choice.lower() == "q":
         sys.exit("Program terminated by user.")
     else:
@@ -224,6 +225,10 @@ while True:
 video_capture = choose_video_source()
 print("\nPress 'q' to quit face recognition.")
 
+# Track recently marked students to prevent spam
+recently_marked = {}  # {rollnumber: timestamp}
+COOLDOWN_SECONDS = 30  # Don't mark same student twice within 30 seconds
+
 while True:
     ret, frame = video_capture.read()
     if not ret:
@@ -233,25 +238,41 @@ while True:
         embedding = face.embedding
         (x1, y1, x2, y2) = face.bbox.astype(int)
         name = "Unknown Student"
+        rollnumber = None
         confidence = 0
+        
         if known_face_encodings:
             sims = [cosine_similarity(embedding, enc) for enc in known_face_encodings]
             best_match_index = np.argmax(sims)
             confidence = sims[best_match_index]
+            
             if confidence > RECOGNITION_THRESHOLD:
                 name = known_names[best_match_index]
+                rollnumber = known_rollnumbers[best_match_index]
+                
+                # Check cooldown period before marking attendance
+                current_time = time.time()
+                if rollnumber not in recently_marked or \
+                   current_time - recently_marked[rollnumber] > COOLDOWN_SECONDS:
+                    
+                    # Mark attendance automatically
+                    if mark_attendance_automatic(rollnumber, name, confidence):
+                        recently_marked[rollnumber] = current_time
+        
+        # Visual feedback
         color = (0, 255, 0) if name != "Unknown Student" else (0, 0, 255)
         cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-        label = f"{name} ({confidence:.2f})" if name != "Unknown Student" else name
-        cv2.putText(
-            frame,
-            label,
-            (x1, y1 - 10),
-            cv2.FONT_HERSHEY_DUPLEX,
-            0.7,
-            (255, 255, 255),
-            2,
-        )
+        
+        label = f"{name} ({confidence:.2f})"
+        cv2.putText(frame, label, (x1, y1 - 10),
+                   cv2.FONT_HERSHEY_DUPLEX, 0.7, (255, 255, 255), 2)
+        
+        # Show if recently marked (visual confirmation)
+        if rollnumber in recently_marked:
+            time_since_marked = int(current_time - recently_marked[rollnumber])
+            if time_since_marked < 5:  # Show "MARKED" for 5 seconds
+                cv2.putText(frame, "MARKED", (x1, y2 + 25),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
 
     cv2.imshow("Video", frame)
     if cv2.waitKey(1) & 0xFF == ord("q"):
