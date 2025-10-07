@@ -6,15 +6,11 @@ import time
 import insightface
 import requests
 import mysql.connector
+from datetime import datetime
 from urllib.parse import urlparse
 
 # --- Import DB functions ---
-from db import (
-    get_known_faces_from_db,
-    list_students,
-    add_face_to_db,
-    mark_attendance_automatic,
-)
+from db import get_known_faces_from_db, list_students, add_face_to_db
 
 # --- Database Configuration ---
 DB_CONFIG = {
@@ -29,6 +25,12 @@ RECOGNITION_THRESHOLD = 0.6
 
 # --- Maximum photos per student ---
 MAX_PHOTOS_PER_STUDENT = 5
+
+# --- Timer-based attendance settings (in seconds) ---
+TIMER_DURATION = 60  # Total observation time
+PRESENT_THRESHOLD = 30  # Must be visible for 30+ seconds for "present"
+LATE_THRESHOLD = 15  # 15-29 seconds = "late"
+# Less than 15 seconds = "absent"
 
 # --- Load RetinaFace + ArcFace Model ---
 print("Loading RetinaFace + ArcFace model...")
@@ -106,6 +108,109 @@ def get_photo_count(rollnumber):
     except mysql.connector.Error as err:
         print(f"Database error: {err}")
         return 0
+    finally:
+        if "db_connection" in locals() and db_connection.is_connected():
+            cursor.close()
+            db_connection.close()
+
+
+def mark_attendance_with_timer(
+    rollnumber, name, confidence_score, duration_seen, session_id=None
+):
+    """
+    Mark attendance based on timer duration.
+
+    Args:
+        rollnumber: Student roll number
+        name: Student name
+        confidence_score: ArcFace similarity score
+        duration_seen: How long student was visible (seconds)
+        session_id: Specific class session ID (optional)
+
+    Returns:
+        True if marked successfully, False if duplicate
+    """
+    try:
+        db_connection = mysql.connector.connect(**DB_CONFIG)
+        cursor = db_connection.cursor()
+
+        current_date = datetime.now().date()
+        current_time = datetime.now()
+
+        # Determine status based on duration
+        if duration_seen >= PRESENT_THRESHOLD:
+            status = "present"
+            status_msg = "PRESENT"
+        elif duration_seen >= LATE_THRESHOLD:
+            status = "late"
+            status_msg = "LATE"
+        else:
+            status = "absent"
+            status_msg = "ABSENT (insufficient time)"
+
+        # Check if already marked for THIS SPECIFIC SESSION
+        if session_id:
+            cursor.execute(
+                """
+                SELECT id FROM attendance 
+                WHERE rollnumber = %s AND session_id = %s
+            """,
+                (rollnumber, session_id),
+            )
+
+            if cursor.fetchone():
+                print(f"⚠️  {name} already marked for this class session")
+                return False
+        else:
+            # If no session_id provided, prevent duplicate within last 5 minutes
+            cursor.execute(
+                """
+                SELECT id FROM attendance 
+                WHERE rollnumber = %s 
+                AND timestamp >= DATE_SUB(NOW(), INTERVAL 5 MINUTE)
+            """,
+                (rollnumber,),
+            )
+
+            if cursor.fetchone():
+                print(f"⚠️  {name} marked recently (within 5 minutes)")
+                return False
+
+        # Prepare notes with duration information
+        notes = (
+            f"Visible for {duration_seen:.1f} seconds out of {TIMER_DURATION}s timer"
+        )
+
+        # Insert attendance record
+        cursor.execute(
+            """
+            INSERT INTO attendance 
+            (session_id, rollnumber, student_name, confidence_score, 
+             timestamp, date, status, marked_by_system, notes)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, 1, %s)
+        """,
+            (
+                session_id,
+                rollnumber,
+                name,
+                float(confidence_score),
+                current_time,
+                current_date,
+                status,
+                notes,
+            ),
+        )
+
+        db_connection.commit()
+        print(
+            f"✓ Attendance marked: {name} - {status_msg} (seen: {duration_seen:.1f}s, confidence: {confidence_score:.3f})"
+        )
+        return True
+
+    except mysql.connector.Error as err:
+        print(f"✗ Error marking attendance: {err}")
+        db_connection.rollback()
+        return False
     finally:
         if "db_connection" in locals() and db_connection.is_connected():
             cursor.close()
@@ -309,7 +414,7 @@ known_names, known_face_encodings, known_rollnumbers = get_known_faces_from_db()
 while True:
     print("\n--- Menu ---")
     print("1. Add a new student")
-    print("2. Start face recognition")
+    print("2. Start face recognition (Timer-based Attendance)")
     print("3. List all students")
     print("4. Add images for existing student")
     print("q. Quit")
@@ -338,19 +443,33 @@ while True:
         print("Invalid choice.")
 
 
-# ---------------- Face Recognition Loop ---------------- #
+# ---------------- Timer-Based Face Recognition Loop ---------------- #
 video_capture = choose_video_source()
-print("\nPress 'q' to quit face recognition.")
+print("\n" + "=" * 60)
+print("TIMER-BASED ATTENDANCE SYSTEM")
+print("=" * 60)
+print(f"⏱️  Timer Duration: {TIMER_DURATION} seconds")
+print(f"✓ Present: Visible for ≥{PRESENT_THRESHOLD} seconds")
+print(f"⚠️  Late: Visible for {LATE_THRESHOLD}-{PRESENT_THRESHOLD-1} seconds")
+print(f"✗ Absent: Visible for <{LATE_THRESHOLD} seconds")
+print("=" * 60)
+print("\nPress 'q' to quit face recognition.\n")
 
-# Track recently marked students to prevent spam
-recently_marked = {}  # {rollnumber: timestamp}
-COOLDOWN_SECONDS = 30  # Don't mark same student twice within 30 seconds
+# Track student timers
+student_timers = (
+    {}
+)  # {rollnumber: {'start_time': time, 'total_visible': seconds, 'last_seen': time, 'marked': bool}}
+already_marked = set()  # Students who have been marked (to prevent re-marking)
 
 while True:
     ret, frame = video_capture.read()
     if not ret:
         continue
+
+    current_time = time.time()
     faces = app.get(frame)
+    detected_rollnumbers = set()
+
     for face in faces:
         embedding = face.embedding
         (x1, y1, x2, y2) = face.bbox.astype(int)
@@ -366,50 +485,140 @@ while True:
             if confidence > RECOGNITION_THRESHOLD:
                 name = known_names[best_match_index]
                 rollnumber = known_rollnumbers[best_match_index]
+                detected_rollnumbers.add(rollnumber)
 
-                # Check cooldown period before marking attendance
-                current_time = time.time()
+                # Check if already marked in this session
+                if rollnumber in already_marked:
+                    detected_rollnumbers.add(rollnumber)
+                    # Show marked status but don't start new timer
+                    color = (0, 255, 0)
+                    cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+                    cv2.putText(
+                        frame,
+                        f"{name} ({confidence:.2f})",
+                        (x1, y1 - 30),
+                        cv2.FONT_HERSHEY_DUPLEX,
+                        0.6,
+                        (255, 255, 255),
+                        2,
+                    )
+                    cv2.putText(
+                        frame,
+                        "ALREADY MARKED",
+                        (x1, y1 - 10),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.5,
+                        (0, 255, 0),
+                        2,
+                    )
+                    continue
+
+                # Initialize timer for new student
+                if rollnumber not in student_timers:
+                    student_timers[rollnumber] = {
+                        "start_time": current_time,
+                        "total_visible": 0,
+                        "last_seen": current_time,
+                        "marked": False,
+                        "name": name,
+                        "confidence": confidence,
+                    }
+                    print(f"\n⏱️  Timer started for {name} (Roll: {rollnumber})")
+
+                # Update timer
+                timer_data = student_timers[rollnumber]
+                elapsed_since_start = current_time - timer_data["start_time"]
+
+                # Increment visible time (update every frame seen)
                 if (
-                    rollnumber not in recently_marked
-                    or current_time - recently_marked[rollnumber] > COOLDOWN_SECONDS
-                ):
+                    current_time - timer_data["last_seen"] < 2
+                ):  # Within 2 seconds = continuous
+                    timer_data["total_visible"] += (
+                        current_time - timer_data["last_seen"]
+                    )
+                timer_data["last_seen"] = current_time
+                timer_data["confidence"] = confidence
 
-                    # Mark attendance automatically
-                    if mark_attendance_automatic(rollnumber, name, confidence):
-                        recently_marked[rollnumber] = current_time
+                # Check if timer duration completed
+                if elapsed_since_start >= TIMER_DURATION and not timer_data["marked"]:
+                    # Timer finished - mark attendance
+                    duration_seen = timer_data["total_visible"]
+                    mark_attendance_with_timer(
+                        rollnumber, name, confidence, duration_seen
+                    )
+                    timer_data["marked"] = True
+                    already_marked.add(rollnumber)
 
-        # Visual feedback
-        color = (0, 255, 0) if name != "Unknown Student" else (0, 0, 255)
-        cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+                # Visual feedback
+                if timer_data["marked"]:
+                    color = (0, 255, 0)  # Green for marked
+                    status_text = "MARKED"
+                else:
+                    color = (255, 165, 0)  # Orange for in-progress
+                    time_remaining = max(0, TIMER_DURATION - elapsed_since_start)
+                    status_text = f"Timer: {int(time_remaining)}s | Visible: {int(timer_data['total_visible'])}s"
 
-        label = f"{name} ({confidence:.2f})"
-        cv2.putText(
-            frame,
-            label,
-            (x1, y1 - 10),
-            cv2.FONT_HERSHEY_DUPLEX,
-            0.7,
-            (255, 255, 255),
-            2,
-        )
+                cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
 
-        # Show if recently marked (visual confirmation)
-        if rollnumber in recently_marked:
-            time_since_marked = int(current_time - recently_marked[rollnumber])
-            if time_since_marked < 5:  # Show "MARKED" for 5 seconds
+                # Display name and confidence
+                label = f"{name} ({confidence:.2f})"
                 cv2.putText(
                     frame,
-                    "MARKED",
-                    (x1, y2 + 25),
-                    cv2.FONT_HERSHEY_SIMPLEX,
+                    label,
+                    (x1, y1 - 30),
+                    cv2.FONT_HERSHEY_DUPLEX,
                     0.6,
-                    (0, 255, 0),
+                    (255, 255, 255),
                     2,
                 )
 
-    cv2.imshow("Video", frame)
+                # Display timer status
+                cv2.putText(
+                    frame,
+                    status_text,
+                    (x1, y1 - 10),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.5,
+                    color,
+                    2,
+                )
+        else:
+            # Unknown student
+            color = (0, 0, 255)
+            cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+            cv2.putText(
+                frame,
+                name,
+                (x1, y1 - 10),
+                cv2.FONT_HERSHEY_DUPLEX,
+                0.7,
+                (255, 255, 255),
+                2,
+            )
+
+    # Clean up students who left (not detected for 3+ seconds)
+    rollnumbers_to_remove = []
+    for rollnumber, timer_data in student_timers.items():
+        if rollnumber not in detected_rollnumbers:
+            if current_time - timer_data["last_seen"] > 3:
+                if not timer_data["marked"]:
+                    # Student left before timer completed - DO NOT remove from tracking
+                    # Keep them in already_marked to prevent re-entry
+                    elapsed = current_time - timer_data["start_time"]
+                    if elapsed < TIMER_DURATION:
+                        print(
+                            f"⚠️  {timer_data['name']} left early (visible: {timer_data['total_visible']:.1f}s) - Will not be re-timed if returns"
+                        )
+                        already_marked.add(rollnumber)  # Prevent re-entry
+                rollnumbers_to_remove.append(rollnumber)
+
+    for rollnumber in rollnumbers_to_remove:
+        del student_timers[rollnumber]
+
+    cv2.imshow("Timer-Based Attendance System", frame)
     if cv2.waitKey(1) & 0xFF == ord("q"):
         break
 
 video_capture.release()
 cv2.destroyAllWindows()
+print("\n✓ Face recognition stopped.")
