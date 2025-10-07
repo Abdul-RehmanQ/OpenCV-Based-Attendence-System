@@ -54,12 +54,14 @@ def list_students():
     try:
         db_connection = mysql.connector.connect(**DB_CONFIG)
         cursor = db_connection.cursor()
-        cursor.execute("""
+        cursor.execute(
+            """
             SELECT rollnumber, name, department, batch 
             FROM students 
             WHERE is_active = 1
             ORDER BY name
-        """)
+        """
+        )
         results = cursor.fetchall()
         if not results:
             print("No students found in the database.")
@@ -120,59 +122,75 @@ def mark_attendance_automatic(rollnumber, name, confidence_score, session_id=Non
     """
     Automatically mark attendance via face recognition.
     Called by main.py recognition loop.
-    
+
     Args:
         rollnumber: Student roll number
         name: Student name
         confidence_score: ArcFace similarity score
         session_id: Specific class session ID (optional)
-    
+
     Returns:
         True if marked successfully, False if duplicate
     """
     try:
         db_connection = mysql.connector.connect(**DB_CONFIG)
         cursor = db_connection.cursor()
-        
+
         current_date = datetime.now().date()
         current_time = datetime.now()
-        
+
         # Check if already marked for THIS SPECIFIC SESSION
         # This allows multiple classes per day!
         if session_id:
-            cursor.execute("""
+            cursor.execute(
+                """
                 SELECT id FROM attendance 
                 WHERE rollnumber = %s AND session_id = %s
-            """, (rollnumber, session_id))
-            
+            """,
+                (rollnumber, session_id),
+            )
+
             if cursor.fetchone():
                 print(f"⚠️  {name} already marked for this class session")
                 return False
         else:
             # If no session_id provided, prevent duplicate within last 5 minutes
             # (In case you're running without sessions)
-            cursor.execute("""
+            cursor.execute(
+                """
                 SELECT id FROM attendance 
                 WHERE rollnumber = %s 
                 AND timestamp >= DATE_SUB(NOW(), INTERVAL 5 MINUTE)
-            """, (rollnumber,))
-            
+            """,
+                (rollnumber,),
+            )
+
             if cursor.fetchone():
                 print(f"⚠️  {name} marked recently (within 5 minutes)")
                 return False
-        
+
         # Insert attendance record
-        cursor.execute("""
+        cursor.execute(
+            """
             INSERT INTO attendance 
             (session_id, rollnumber, student_name, confidence_score, 
              timestamp, date, status, marked_by_system)
             VALUES (%s, %s, %s, %s, %s, %s, 'present', 1)
-        """, (session_id, rollnumber, name, confidence_score, current_time, current_date))
-        
+        """,
+            (
+                session_id,
+                rollnumber,
+                name,
+                float(confidence_score),
+                current_time,
+                current_date,
+            ),
+        )
+
         db_connection.commit()
         print(f"✓ Attendance marked for {name} (confidence: {confidence_score:.3f})")
         return True
-        
+
     except mysql.connector.Error as err:
         print(f"❌ Error marking attendance: {err}")
         db_connection.rollback()
