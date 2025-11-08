@@ -5,12 +5,31 @@ import sys
 import time
 import insightface
 import requests
-import mysql.connector
 from datetime import datetime
-from urllib.parse import urlparse
 
 # --- Import DB functions ---
-from db import get_known_faces_from_db, list_students, add_face_to_db
+from db import (
+    # Student management
+    get_known_faces_from_db,
+    list_students,
+    add_face_to_db,
+    get_photo_count,
+    # Class management
+    list_classes,
+    create_class,
+    # Enrollment management
+    get_eligible_students_for_class,
+    enroll_student_in_class,
+    bulk_enroll_students_in_class,
+    list_class_enrollments,
+    remove_student_from_class,
+    # Timer-based attendance
+    create_timer_session,
+    log_detection_event,
+    finalize_session_attendance,
+    get_class_roster,
+    get_detected_students,
+)
 
 # --- Database Configuration ---
 DB_CONFIG = {
@@ -26,12 +45,6 @@ RECOGNITION_THRESHOLD = 0.6
 # --- Maximum photos per student ---
 MAX_PHOTOS_PER_STUDENT = 5
 
-# --- Timer-based attendance settings (in seconds) ---
-TIMER_DURATION = 60  # Total observation time
-PRESENT_THRESHOLD = 30  # Must be visible for 30+ seconds for "present"
-LATE_THRESHOLD = 15  # 15-29 seconds = "late"
-# Less than 15 seconds = "absent"
-
 # --- Load RetinaFace + ArcFace Model ---
 print("Loading RetinaFace + ArcFace model...")
 app = insightface.app.FaceAnalysis(name="buffalo_l", providers=["CPUExecutionProvider"])
@@ -39,7 +52,11 @@ app.prepare(ctx_id=0, det_size=(640, 640))
 print("Model loaded successfully.")
 
 
-# ---------------- Utility Functions ---------------- #
+# ============================================
+# UTILITY FUNCTIONS
+# ============================================
+
+
 def cosine_similarity(a, b):
     """Compute cosine similarity between two embeddings."""
     return np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b))
@@ -95,129 +112,35 @@ def extract_embedding(frame):
     return face.embedding, face.bbox
 
 
-def get_photo_count(rollnumber):
-    """Get the current number of photos for a student."""
-    try:
-        db_connection = mysql.connector.connect(**DB_CONFIG)
-        cursor = db_connection.cursor()
-        cursor.execute(
-            "SELECT COUNT(*) FROM student_photos WHERE rollnumber = %s", (rollnumber,)
-        )
-        count = cursor.fetchone()[0]
-        return count
-    except mysql.connector.Error as err:
-        print(f"Database error: {err}")
-        return 0
-    finally:
-        if "db_connection" in locals() and db_connection.is_connected():
-            cursor.close()
-            db_connection.close()
-
-
-def mark_attendance_with_timer(
-    rollnumber, name, confidence_score, duration_seen, session_id=None
-):
+def parse_selection(selection_str):
     """
-    Mark attendance based on timer duration.
-
-    Args:
-        rollnumber: Student roll number
-        name: Student name
-        confidence_score: ArcFace similarity score
-        duration_seen: How long student was visible (seconds)
-        session_id: Specific class session ID (optional)
-
-    Returns:
-        True if marked successfully, False if duplicate
+    Parse selection like "1,3,5-10,15" into list of indices.
+    Returns: [1, 3, 5, 6, 7, 8, 9, 10, 15]
     """
-    try:
-        db_connection = mysql.connector.connect(**DB_CONFIG)
-        cursor = db_connection.cursor()
+    indices = set()
+    parts = selection_str.replace(" ", "").split(",")
 
-        current_date = datetime.now().date()
-        current_time = datetime.now()
-
-        # Determine status based on duration
-        if duration_seen >= PRESENT_THRESHOLD:
-            status = "present"
-            status_msg = "PRESENT"
-        elif duration_seen >= LATE_THRESHOLD:
-            status = "late"
-            status_msg = "LATE"
+    for part in parts:
+        if "-" in part:
+            try:
+                start, end = part.split("-")
+                indices.update(range(int(start), int(end) + 1))
+            except ValueError:
+                continue
         else:
-            status = "absent"
-            status_msg = "ABSENT (insufficient time)"
+            try:
+                indices.add(int(part))
+            except ValueError:
+                continue
 
-        # Check if already marked for THIS SPECIFIC SESSION
-        if session_id:
-            cursor.execute(
-                """
-                SELECT id FROM attendance 
-                WHERE rollnumber = %s AND session_id = %s
-            """,
-                (rollnumber, session_id),
-            )
-
-            if cursor.fetchone():
-                print(f"⚠️  {name} already marked for this class session")
-                return False
-        else:
-            # If no session_id provided, prevent duplicate within last 5 minutes
-            cursor.execute(
-                """
-                SELECT id FROM attendance 
-                WHERE rollnumber = %s 
-                AND timestamp >= DATE_SUB(NOW(), INTERVAL 5 MINUTE)
-            """,
-                (rollnumber,),
-            )
-
-            if cursor.fetchone():
-                print(f"⚠️  {name} marked recently (within 5 minutes)")
-                return False
-
-        # Prepare notes with duration information
-        notes = (
-            f"Visible for {duration_seen:.1f} seconds out of {TIMER_DURATION}s timer"
-        )
-
-        # Insert attendance record
-        cursor.execute(
-            """
-            INSERT INTO attendance 
-            (session_id, rollnumber, student_name, confidence_score, 
-             timestamp, date, status, marked_by_system, notes)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, 1, %s)
-        """,
-            (
-                session_id,
-                rollnumber,
-                name,
-                float(confidence_score),
-                current_time,
-                current_date,
-                status,
-                notes,
-            ),
-        )
-
-        db_connection.commit()
-        print(
-            f"✓ Attendance marked: {name} - {status_msg} (seen: {duration_seen:.1f}s, confidence: {confidence_score:.3f})"
-        )
-        return True
-
-    except mysql.connector.Error as err:
-        print(f"✗ Error marking attendance: {err}")
-        db_connection.rollback()
-        return False
-    finally:
-        if "db_connection" in locals() and db_connection.is_connected():
-            cursor.close()
-            db_connection.close()
+    return sorted(indices)
 
 
-# ---------------- Enrollment Functions ---------------- #
+# ============================================
+# ENROLLMENT FUNCTIONS
+# ============================================
+
+
 def handle_add_new_face():
     """Guide user to add student with roll number and name."""
     rollnumber = input("Enter the student's roll number (or q to quit): ")
@@ -408,217 +331,511 @@ def add_images_for_existing_student():
     return False
 
 
-# ---------------- Main Program ---------------- #
-known_names, known_face_encodings, known_rollnumbers = get_known_faces_from_db()
+# ============================================
+# CLASS MANAGEMENT FUNCTIONS
+# ============================================
 
-while True:
-    print("\n--- Menu ---")
-    print("1. Add a new student")
-    print("2. Start face recognition (Timer-based Attendance)")
-    print("3. List all students")
-    print("4. Add images for existing student")
-    print("q. Quit")
-    choice = input("Enter your choice: ")
+
+def handle_create_class():
+    """Interactive class creation."""
+    print("\n--- Create New Class ---")
+
+    class_name = input("Class name (e.g., Database Systems): ").strip()
+    if not class_name:
+        print("Class name cannot be empty.")
+        return False
+
+    course_code = input("Course code (e.g., CS-301): ").strip()
+    if not course_code:
+        print("Course code cannot be empty.")
+        return False
+
+    department = input("Department (e.g., Computer Science): ").strip()
+    if not department:
+        print("Department cannot be empty.")
+        return False
+
+    batch = input("Target batch/year (e.g., 2022): ").strip()
+    if not batch:
+        print("Batch cannot be empty.")
+        return False
+
+    semester = input("Semester (optional, e.g., Fall 2025): ").strip()
+    instructor = input("Instructor name (optional): ").strip()
+
+    # Create class
+    class_id = create_class(
+        class_name=class_name,
+        course_code=course_code,
+        department=department,
+        batch=batch,
+        semester=semester if semester else None,
+        instructor=instructor if instructor else None,
+    )
+
+    if class_id:
+        # Ask if teacher wants to enroll students now
+        enroll_now = input("\nEnroll students now? (y/n): ").strip().lower()
+        if enroll_now == "y":
+            handle_enroll_students_in_class(class_id, department, batch)
+        return True
+
+    return False
+
+
+def handle_enroll_students_in_class(class_id=None, department=None, batch=None):
+    """Interactive student enrollment for a class."""
+
+    # If class_id not provided, ask user to select
+    if class_id is None:
+        classes = list_classes()
+        if not classes:
+            print("\n✗ No classes found. Create a class first.")
+            return False
+
+        class_id = input("\nEnter class ID to enroll students: ").strip()
+        if not class_id.isdigit():
+            print("Invalid class ID.")
+            return False
+        class_id = int(class_id)
+
+    # Get class info if department/batch not provided
+    if department is None or batch is None:
+        import mysql.connector
+
+        try:
+            db_connection = mysql.connector.connect(**DB_CONFIG)
+            cursor = db_connection.cursor(dictionary=True)
+            cursor.execute(
+                """
+                SELECT class_name, course_code, department, semester
+                FROM classes WHERE id = %s
+            """,
+                (class_id,),
+            )
+            class_info = cursor.fetchone()
+
+            if not class_info:
+                print(f"✗ Class ID {class_id} not found")
+                return False
+
+            print(
+                f"\n--- Enrolling Students in {class_info['class_name']} ({class_info['course_code']}) ---"
+            )
+
+            # Get department and batch
+            if department is None:
+                department = class_info["department"]
+
+            if batch is None:
+                batch = input(f"Enter target batch (e.g., 2022): ").strip()
+
+        except mysql.connector.Error as err:
+            print(f"Error: {err}")
+            return False
+        finally:
+            if db_connection.is_connected():
+                cursor.close()
+                db_connection.close()
+
+    # Get eligible students
+    eligible = get_eligible_students_for_class(department, batch)
+
+    if not eligible:
+        print("\n✗ No eligible students found.")
+        print("   Students must:")
+        print("   1. Be in the specified department and batch")
+        print("   2. Have face photos enrolled")
+        print("   3. Be active")
+        return False
+
+    # Display list
+    print("\n" + "=" * 70)
+    print("ELIGIBLE STUDENTS")
+    print("=" * 70)
+
+    for idx, student in enumerate(eligible, 1):
+        print(f"{idx:2d}. {student['name']:30s} ({student['rollnumber']})")
+        print(
+            f"    {student['department']}, Batch {student['batch']}, {student['photo_count']} photos"
+        )
+
+    print("=" * 70)
+
+    # Get teacher's selection
+    print("\nEnrollment Options:")
+    print("1. Enroll all students")
+    print("2. Select specific students (e.g., 1,3,5-10,15)")
+    print("3. Cancel")
+
+    choice = input("\nEnter choice: ").strip()
 
     if choice == "1":
-        if handle_add_new_face():
-            known_names, known_face_encodings, known_rollnumbers = (
-                get_known_faces_from_db()
-            )
+        # Enroll all
+        rollnumbers = [s["rollnumber"] for s in eligible]
+        bulk_enroll_students_in_class(class_id, rollnumbers)
+        return True
+
     elif choice == "2":
-        if not known_face_encodings:
-            print("No student records found. Add at least one student first.")
+        # Select specific
+        selection = input("Enter student numbers (e.g., 1,3,5-10,15): ").strip()
+
+        # Parse selection
+        selected_indices = parse_selection(selection)
+        rollnumbers = [
+            eligible[i - 1]["rollnumber"]
+            for i in selected_indices
+            if 0 < i <= len(eligible)
+        ]
+
+        if rollnumbers:
+            bulk_enroll_students_in_class(class_id, rollnumbers)
+            return True
         else:
-            break
-    elif choice == "3":
-        list_students()
-    elif choice == "4":
-        if add_images_for_existing_student():
-            known_names, known_face_encodings, known_rollnumbers = (
-                get_known_faces_from_db()
-            )
-    elif choice.lower() == "q":
-        sys.exit("Program terminated by user.")
+            print("✗ No valid students selected.")
+            return False
+
     else:
-        print("Invalid choice.")
+        print("Enrollment cancelled.")
+        return False
 
 
-# ---------------- Timer-Based Face Recognition Loop ---------------- #
-video_capture = choose_video_source()
-print("\n" + "=" * 60)
-print("TIMER-BASED ATTENDANCE SYSTEM")
-print("=" * 60)
-print(f"⏱️  Timer Duration: {TIMER_DURATION} seconds")
-print(f"✓ Present: Visible for ≥{PRESENT_THRESHOLD} seconds")
-print(f"⚠️  Late: Visible for {LATE_THRESHOLD}-{PRESENT_THRESHOLD-1} seconds")
-print(f"✗ Absent: Visible for <{LATE_THRESHOLD} seconds")
-print("=" * 60)
-print("\nPress 'q' to quit face recognition.\n")
+def handle_view_class_enrollments():
+    """View students enrolled in a class."""
+    classes = list_classes()
+    if not classes:
+        print("\n✗ No classes found.")
+        return
 
-# Track student timers
-student_timers = (
-    {}
-)  # {rollnumber: {'start_time': time, 'total_visible': seconds, 'last_seen': time, 'marked': bool}}
-already_marked = set()  # Students who have been marked (to prevent re-marking)
+    class_id = input("\nEnter class ID to view enrollments: ").strip()
+    if not class_id.isdigit():
+        print("Invalid class ID.")
+        return
 
-while True:
-    ret, frame = video_capture.read()
-    if not ret:
-        continue
+    enrollments = list_class_enrollments(int(class_id))
 
-    current_time = time.time()
-    faces = app.get(frame)
-    detected_rollnumbers = set()
+    if enrollments:
+        # Ask if teacher wants to remove any student
+        remove = input("\nRemove a student? (y/n): ").strip().lower()
+        if remove == "y":
+            rollnumber = input("Enter roll number to remove: ").strip()
+            remove_student_from_class(int(class_id), rollnumber)
 
-    for face in faces:
-        embedding = face.embedding
-        (x1, y1, x2, y2) = face.bbox.astype(int)
-        name = "Unknown Student"
-        rollnumber = None
-        confidence = 0
 
-        if known_face_encodings:
-            sims = [cosine_similarity(embedding, enc) for enc in known_face_encodings]
-            best_match_index = np.argmax(sims)
-            confidence = sims[best_match_index]
+# ============================================
+# TIMER-BASED ATTENDANCE SYSTEM
+# ============================================
 
-            if confidence > RECOGNITION_THRESHOLD:
-                name = known_names[best_match_index]
-                rollnumber = known_rollnumbers[best_match_index]
-                detected_rollnumbers.add(rollnumber)
 
-                # Check if already marked in this session
-                if rollnumber in already_marked:
-                    detected_rollnumbers.add(rollnumber)
-                    # Show marked status but don't start new timer
-                    color = (0, 255, 0)
-                    cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-                    cv2.putText(
-                        frame,
-                        f"{name} ({confidence:.2f})",
-                        (x1, y1 - 30),
-                        cv2.FONT_HERSHEY_DUPLEX,
-                        0.6,
-                        (255, 255, 255),
-                        2,
-                    )
-                    cv2.putText(
-                        frame,
-                        "ALREADY MARKED",
-                        (x1, y1 - 10),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.5,
-                        (0, 255, 0),
-                        2,
-                    )
-                    continue
+def start_timer_based_attendance():
+    """
+    Timer-based attendance system.
+    Teacher starts session, system logs detections, finalizes at end.
+    """
+    # Step 1: Show available classes
+    classes = list_classes()
+    if not classes:
+        print("\n✗ No classes found. Please create a class first.")
+        return
 
-                # Initialize timer for new student
-                if rollnumber not in student_timers:
-                    student_timers[rollnumber] = {
-                        "start_time": current_time,
-                        "total_visible": 0,
-                        "last_seen": current_time,
-                        "marked": False,
-                        "name": name,
-                        "confidence": confidence,
-                    }
-                    print(f"\n⏱️  Timer started for {name} (Roll: {rollnumber})")
+    # Step 2: Get class selection
+    print("\n")
+    class_id = input("Enter class ID: ").strip()
+    if not class_id.isdigit():
+        print("Invalid class ID.")
+        return
+    class_id = int(class_id)
 
-                # Update timer
-                timer_data = student_timers[rollnumber]
-                elapsed_since_start = current_time - timer_data["start_time"]
+    # Step 3: Get timer settings
+    print("\n--- Timer Settings ---")
+    print("Recommended for testing: 60 seconds duration, 15 seconds late threshold")
+    print("Recommended for real class: 5400 seconds (90 min), 300 seconds (5 min)")
 
-                # Increment visible time (update every frame seen)
-                if (
-                    current_time - timer_data["last_seen"] < 2
-                ):  # Within 2 seconds = continuous
-                    timer_data["total_visible"] += (
-                        current_time - timer_data["last_seen"]
-                    )
-                timer_data["last_seen"] = current_time
-                timer_data["confidence"] = confidence
+    duration_input = input("\nEnter timer duration in seconds (default 60): ").strip()
+    duration_seconds = int(duration_input) if duration_input else 60
 
-                # Check if timer duration completed
-                if elapsed_since_start >= TIMER_DURATION and not timer_data["marked"]:
-                    # Timer finished - mark attendance
-                    duration_seen = timer_data["total_visible"]
-                    mark_attendance_with_timer(
-                        rollnumber, name, confidence, duration_seen
-                    )
-                    timer_data["marked"] = True
-                    already_marked.add(rollnumber)
+    late_threshold_input = input(
+        "Enter late threshold in seconds (default 15): "
+    ).strip()
+    late_threshold = int(late_threshold_input) if late_threshold_input else 15
 
-                # Visual feedback
-                if timer_data["marked"]:
-                    color = (0, 255, 0)  # Green for marked
-                    status_text = "MARKED"
+    # Step 4: Load roster
+    print("\n🔄 Loading class roster...")
+    roster = get_class_roster(class_id)
+    if not roster:
+        print("\n✗ No students enrolled in this class!")
+        print("   Go to menu option 5 to enroll students first.")
+        return
+
+    print(f"\n✓ Loaded {len(roster)} students:")
+    for student in roster:
+        print(f"  - {student['name']} ({student['rollnumber']})")
+
+    # Step 5: Load known faces
+    print("\n🔄 Loading face recognition data...")
+    known_names, known_face_encodings, known_rollnumbers = get_known_faces_from_db()
+    if not known_face_encodings:
+        print("✗ No student face data found. Enroll students first.")
+        return
+
+    # Step 6: Create session
+    print("\n🔄 Creating attendance session...")
+    session_id = create_timer_session(
+        class_id=class_id,
+        duration_seconds=duration_seconds,
+        late_threshold_seconds=late_threshold,
+        min_presence_percent=0.80,  # 80% rule
+        marked_by=None,  # TODO: Add user_id when implementing login
+    )
+
+    if not session_id:
+        print("✗ Failed to create session!")
+        return
+
+    # Step 7: Start video capture
+    video_capture = choose_video_source()
+
+    # Step 8: Display session info
+    print("\n" + "=" * 70)
+    print("TIMER-BASED ATTENDANCE SESSION STARTED")
+    print("=" * 70)
+    print(f"📋 Class ID: {class_id}")
+    print(f"🆔 Session ID: {session_id}")
+    print(f"⏱️  Duration: {duration_seconds}s ({duration_seconds/60:.1f} minutes)")
+    print(f"✓ On-time window: 0-{late_threshold}s")
+    print(f"⚠️  Late if arrives after: {late_threshold}s")
+    print(f"📊 Minimum presence required: 80% ({int(duration_seconds*0.8)}s)")
+    print(f"👥 Expected students: {len(roster)}")
+    print("=" * 70)
+    print("\n⌨️  Press 'q' to stop early and finalize attendance")
+    print("⌨️  Press 'd' to see detection stats\n")
+
+    # Step 9: Run detection loop
+    session_start_time = time.time()
+    detection_log = {}  # Track who we've seen {rollnumber: last_logged_time}
+    frame_count = 0
+
+    try:
+        while True:
+            ret, frame = video_capture.read()
+            if not ret:
+                print("⚠️  Failed to read frame from camera")
+                time.sleep(0.1)
+                continue
+
+            current_time = time.time()
+            elapsed_seconds = int(current_time - session_start_time)
+            frame_count += 1
+
+            # Check if timer expired
+            if elapsed_seconds >= duration_seconds:
+                print(f"\n⏰ Timer completed ({duration_seconds}s)")
+                break
+
+            # Detect faces (process every frame for smooth display)
+            faces = app.get(frame)
+
+            for face in faces:
+                embedding = face.embedding
+                (x1, y1, x2, y2) = face.bbox.astype(int)
+
+                name = "Unknown"
+                rollnumber = None
+                confidence = 0
+
+                if known_face_encodings:
+                    # Find best match
+                    sims = [
+                        cosine_similarity(embedding, enc)
+                        for enc in known_face_encodings
+                    ]
+                    best_match_index = np.argmax(sims)
+                    confidence = sims[best_match_index]
+
+                    if confidence > RECOGNITION_THRESHOLD:
+                        name = known_names[best_match_index]
+                        rollnumber = known_rollnumbers[best_match_index]
+
+                        # Log detection every second (avoid spam)
+                        last_log = detection_log.get(rollnumber, 0)
+                        if current_time - last_log >= 1.0:
+                            log_detection_event(
+                                session_id=session_id,
+                                rollnumber=rollnumber,
+                                detected_at_seconds=elapsed_seconds,
+                                confidence_score=confidence,
+                            )
+                            detection_log[rollnumber] = current_time
+                            print(
+                                f"✓ Logged: {name} at {elapsed_seconds}s (confidence: {confidence:.3f})"
+                            )
+
+                        # Visual feedback - green for recognized
+                        color = (0, 255, 0)
+                        status = f"DETECTED ({confidence:.2f})"
+                    else:
+                        # Low confidence - yellow
+                        color = (0, 165, 255)
+                        status = f"Low Conf ({confidence:.2f})"
                 else:
-                    color = (255, 165, 0)  # Orange for in-progress
-                    time_remaining = max(0, TIMER_DURATION - elapsed_since_start)
-                    status_text = f"Timer: {int(time_remaining)}s | Visible: {int(timer_data['total_visible'])}s"
+                    # Unknown - red
+                    color = (0, 0, 255)
+                    status = "UNKNOWN"
 
+                # Draw bounding box
                 cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
 
-                # Display name and confidence
-                label = f"{name} ({confidence:.2f})"
+                # Draw name/status
                 cv2.putText(
                     frame,
-                    label,
+                    f"{name}",
                     (x1, y1 - 30),
                     cv2.FONT_HERSHEY_DUPLEX,
-                    0.6,
+                    0.7,
                     (255, 255, 255),
                     2,
                 )
-
-                # Display timer status
                 cv2.putText(
                     frame,
-                    status_text,
+                    status,
                     (x1, y1 - 10),
                     cv2.FONT_HERSHEY_SIMPLEX,
                     0.5,
                     color,
                     2,
                 )
-        else:
-            # Unknown student
-            color = (0, 0, 255)
-            cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+
+            # Display timer info on frame
+            remaining = duration_seconds - elapsed_seconds
+            minutes_remaining = remaining // 60
+            seconds_remaining = remaining % 60
+
+            # Timer display
+            timer_text = f"Time: {minutes_remaining:02d}:{seconds_remaining:02d}"
             cv2.putText(
                 frame,
-                name,
-                (x1, y1 - 10),
+                timer_text,
+                (10, 40),
                 cv2.FONT_HERSHEY_DUPLEX,
-                0.7,
+                1.2,
+                (0, 255, 255),
+                2,
+            )
+
+            # Detected count
+            unique_detected = len(detection_log)
+            detected_text = f"Detected: {unique_detected}/{len(roster)}"
+            cv2.putText(
+                frame,
+                detected_text,
+                (10, 80),
+                cv2.FONT_HERSHEY_DUPLEX,
+                0.8,
                 (255, 255, 255),
                 2,
             )
 
-    # Clean up students who left (not detected for 3+ seconds)
-    rollnumbers_to_remove = []
-    for rollnumber, timer_data in student_timers.items():
-        if rollnumber not in detected_rollnumbers:
-            if current_time - timer_data["last_seen"] > 3:
-                if not timer_data["marked"]:
-                    # Student left before timer completed - DO NOT remove from tracking
-                    # Keep them in already_marked to prevent re-entry
-                    elapsed = current_time - timer_data["start_time"]
-                    if elapsed < TIMER_DURATION:
-                        print(
-                            f"⚠️  {timer_data['name']} left early (visible: {timer_data['total_visible']:.1f}s) - Will not be re-timed if returns"
-                        )
-                        already_marked.add(rollnumber)  # Prevent re-entry
-                rollnumbers_to_remove.append(rollnumber)
+            # Show frame
+            cv2.imshow("Timer-Based Attendance System", frame)
 
-    for rollnumber in rollnumbers_to_remove:
-        del student_timers[rollnumber]
+            # Handle key presses
+            key = cv2.waitKey(1) & 0xFF
+            if key == ord("q"):
+                print(f"\n⚠️  Timer stopped early at {elapsed_seconds}s")
+                break
+            elif key == ord("d"):
+                # Show detection stats
+                detected_students = get_detected_students(session_id)
+                print(f"\n📊 Detection Stats:")
+                print(f"   Unique students detected: {len(detected_students)}")
+                print(f"   Expected students: {len(roster)}")
+                if len(roster) > 0:
+                    print(
+                        f"   Detection rate: {len(detected_students)/len(roster)*100:.1f}%"
+                    )
 
-    cv2.imshow("Timer-Based Attendance System", frame)
-    if cv2.waitKey(1) & 0xFF == ord("q"):
-        break
+    except KeyboardInterrupt:
+        print(f"\n⚠️  Session interrupted by user")
 
-video_capture.release()
-cv2.destroyAllWindows()
-print("\n✓ Face recognition stopped.")
+    finally:
+        # Step 10: Cleanup
+        video_capture.release()
+        cv2.destroyAllWindows()
+
+        # Step 11: Finalize attendance
+        print("\n" + "=" * 70)
+        print("🔄 FINALIZING ATTENDANCE...")
+        print("=" * 70)
+        print("Processing detection events and calculating attendance status...")
+
+        summary = finalize_session_attendance(session_id, user_id=None)
+
+        if summary:
+            print("\n✅ Attendance session completed successfully!")
+            print("\nYou can now view the attendance records in your database.")
+        else:
+            print("\n✗ Error finalizing attendance. Check the database.")
+
+
+# ============================================
+# MAIN PROGRAM
+# ============================================
+
+# Load known faces on startup
+known_names, known_face_encodings, known_rollnumbers = get_known_faces_from_db()
+
+while True:
+    print("\n" + "=" * 70)
+    print("FACE RECOGNITION ATTENDANCE SYSTEM")
+    print("=" * 70)
+    print("1. Add a new student")
+    print("2. Add images for existing student")
+    print("3. List all students")
+    print("4. Create a new class")
+    print("5. Enroll students in a class")
+    print("6. View class enrollments")
+    print("7. Start Timer-Based Attendance")
+    print("q. Quit")
+    print("=" * 70)
+
+    choice = input("Enter your choice: ").strip()
+
+    if choice == "1":
+        if handle_add_new_face():
+            # Reload faces after adding new student
+            known_names, known_face_encodings, known_rollnumbers = (
+                get_known_faces_from_db()
+            )
+
+    elif choice == "2":
+        if add_images_for_existing_student():
+            # Reload faces after adding images
+            known_names, known_face_encodings, known_rollnumbers = (
+                get_known_faces_from_db()
+            )
+
+    elif choice == "3":
+        list_students()
+
+    elif choice == "4":
+        if handle_create_class():
+            # Reload data if needed
+            known_names, known_face_encodings, known_rollnumbers = (
+                get_known_faces_from_db()
+            )
+
+    elif choice == "5":
+        handle_enroll_students_in_class()
+
+    elif choice == "6":
+        handle_view_class_enrollments()
+
+    elif choice == "7":
+        start_timer_based_attendance()
+
+    elif choice.lower() == "q":
+        print("\n👋 Thank you for using the attendance system!")
+        sys.exit(0)
+
+    else:
+        print("\n❌ Invalid choice. Please try again.")
