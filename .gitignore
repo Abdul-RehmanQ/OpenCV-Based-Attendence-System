@@ -12,3 +12,6 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Local storage created at runtime
+local_data/

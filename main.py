@@ -7,8 +7,8 @@ import insightface
 import requests
 from datetime import datetime
 
-# --- Import DB functions ---
-from db import (
+# --- Import local storage functions ---
+from storage import (
     # Student management
     get_known_faces_from_db,
     list_students,
@@ -29,15 +29,8 @@ from db import (
     finalize_session_attendance,
     get_class_roster,
     get_detected_students,
+    get_class_by_id,
 )
-
-# --- Database Configuration ---
-DB_CONFIG = {
-    "host": "localhost",
-    "user": "root",
-    "password": "",
-    "database": "project",
-}
 
 # --- Recognition Threshold for ArcFace (cosine similarity) ---
 RECOGNITION_THRESHOLD = 0.6
@@ -401,42 +394,25 @@ def handle_enroll_students_in_class(class_id=None, department=None, batch=None):
 
     # Get class info if department/batch not provided
     if department is None or batch is None:
-        import mysql.connector
-
-        try:
-            db_connection = mysql.connector.connect(**DB_CONFIG)
-            cursor = db_connection.cursor(dictionary=True)
-            cursor.execute(
-                """
-                SELECT class_name, course_code, department, semester
-                FROM classes WHERE id = %s
-            """,
-                (class_id,),
-            )
-            class_info = cursor.fetchone()
-
-            if not class_info:
-                print(f"✗ Class ID {class_id} not found")
-                return False
-
-            print(
-                f"\n--- Enrolling Students in {class_info['class_name']} ({class_info['course_code']}) ---"
-            )
-
-            # Get department and batch
-            if department is None:
-                department = class_info["department"]
-
-            if batch is None:
-                batch = input(f"Enter target batch (e.g., 2022): ").strip()
-
-        except mysql.connector.Error as err:
-            print(f"Error: {err}")
+        class_info = get_class_by_id(class_id)
+        if not class_info:
+            print(f"✗ Class ID {class_id} not found")
             return False
-        finally:
-            if db_connection.is_connected():
-                cursor.close()
-                db_connection.close()
+
+        print(
+            f"\n--- Enrolling Students in {class_info['class_name']} ({class_info['course_code']}) ---"
+        )
+
+        if department is None:
+            department = class_info.get("department")
+
+        if batch is None:
+            batch = class_info.get("batch")
+            if not batch:
+                batch = input("Enter target batch (e.g., 2022): ").strip()
+
+        if not department:
+            department = input("Enter target department: ").strip()
 
     # Get eligible students
     eligible = get_eligible_students_for_class(department, batch)
@@ -772,9 +748,9 @@ def start_timer_based_attendance():
 
         if summary:
             print("\n✅ Attendance session completed successfully!")
-            print("\nYou can now view the attendance records in your database.")
+            print("\nAttendance records were saved to local storage.")
         else:
-            print("\n✗ Error finalizing attendance. Check the database.")
+            print("\n✗ Error finalizing attendance. Check local storage data.")
 
 
 # ============================================
