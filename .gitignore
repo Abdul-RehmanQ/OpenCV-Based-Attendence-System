@@ -1,5 +1,7 @@
 # Ignore Python virtual environments
 my_env_310/
+venv/
+.venv/
 
 # Byte-compiled / cache files
 __pycache__/

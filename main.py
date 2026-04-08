@@ -5,7 +5,9 @@ import sys
 import time
 import insightface
 import requests
+import warnings
 from datetime import datetime
+from urllib.parse import urlparse, urlunparse
 
 # --- Import local storage functions ---
 from storage import (
@@ -38,11 +40,45 @@ RECOGNITION_THRESHOLD = 0.6
 # --- Maximum photos per student ---
 MAX_PHOTOS_PER_STUDENT = 5
 
+# Suppress non-fatal third-party warnings that clutter interactive flow.
+warnings.filterwarnings(
+    "ignore",
+    category=FutureWarning,
+    message=r"`rcond` parameter will change to the default of machine precision.*",
+)
+warnings.filterwarnings(
+    "ignore",
+    category=FutureWarning,
+    message=r"`estimate` is deprecated since version 0.26.*",
+)
+
 # --- Load RetinaFace + ArcFace Model ---
 print("Loading RetinaFace + ArcFace model...")
 app = insightface.app.FaceAnalysis(name="buffalo_l", providers=["CPUExecutionProvider"])
 app.prepare(ctx_id=0, det_size=(640, 640))
 print("Model loaded successfully.")
+
+
+def _opencv_gui_available():
+    """Check whether this OpenCV build supports GUI windows (imshow/waitKey)."""
+    try:
+        for line in cv2.getBuildInformation().splitlines():
+            if line.strip().startswith("GUI:"):
+                return "NONE" not in line.upper()
+    except Exception:
+        return False
+    return False
+
+
+CV2_GUI_AVAILABLE = _opencv_gui_available()
+
+
+def _print_gui_fix_hint():
+    print("\nOpenCV GUI support is not available in this environment.")
+    print("Fix by running:")
+    print("  pip uninstall -y opencv-python-headless")
+    print("  pip install --force-reinstall opencv-python==4.11.0.86")
+    print("Then run the app again.")
 
 
 # ============================================
@@ -55,13 +91,72 @@ def cosine_similarity(a, b):
     return np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b))
 
 
-def test_ip_camera_connection(url):
-    """Test if IP camera URL is accessible."""
-    try:
-        response = requests.get(url, timeout=5, stream=True)
-        return response.status_code == 200
-    except requests.exceptions.RequestException:
-        return False
+def _build_ip_camera_candidates(raw_url):
+    """Generate likely stream URLs for common IP webcam apps."""
+    candidate_urls = []
+    raw_url = raw_url.strip()
+
+    if not raw_url:
+        return candidate_urls
+
+    if "://" not in raw_url:
+        raw_url = f"http://{raw_url}"
+
+    parsed = urlparse(raw_url)
+    normalized = parsed._replace(params="", fragment="")
+    primary = urlunparse(normalized)
+    candidate_urls.append(primary)
+
+    # If user provided only host/port, try common stream endpoints.
+    if normalized.path.strip("/") == "":
+        base = urlunparse(normalized._replace(path="", query="")).rstrip("/")
+        candidate_urls.extend(
+            [
+                f"{base}/video",  # Android IP Webcam
+                f"{base}/mjpeg",
+                f"{base}/stream",
+                f"{base}/?action=stream",  # mjpg-streamer
+                f"{base}/shot.jpg",
+            ]
+        )
+
+    deduped = []
+    seen = set()
+    for url in candidate_urls:
+        if url not in seen:
+            deduped.append(url)
+            seen.add(url)
+    return deduped
+
+
+def _try_open_capture(source, max_reads=25):
+    """Open capture and verify it can return at least one frame."""
+    cap = cv2.VideoCapture(source)
+    if not cap.isOpened():
+        cap.release()
+        return None
+
+    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+    cap.set(cv2.CAP_PROP_FPS, 30)
+
+    for _ in range(max_reads):
+        ret, frame = cap.read()
+        if ret and frame is not None:
+            return cap
+
+    cap.release()
+    return None
+
+
+def _open_ip_camera(url):
+    """Try connecting to an IP camera using likely stream URL variants."""
+    for candidate_url in _build_ip_camera_candidates(url):
+        print(f"Trying IP camera URL: {candidate_url}")
+        cap = _try_open_capture(candidate_url)
+        if cap is not None:
+            return cap, candidate_url
+
+    return None, None
 
 
 def choose_video_source():
@@ -76,8 +171,8 @@ def choose_video_source():
         if choice.lower() == "q":
             sys.exit("Program terminated by user.")
         elif choice == "1":
-            cap = cv2.VideoCapture(0)
-            if cap.isOpened():
+            cap = _try_open_capture(0, max_reads=8)
+            if cap is not None:
                 print("✓ Laptop webcam opened successfully.")
                 return cap
             else:
@@ -86,12 +181,14 @@ def choose_video_source():
             url = input("Enter your IP webcam URL (or q to quit): ")
             if url.lower() == "q":
                 sys.exit("Program terminated by user.")
-            if test_ip_camera_connection(url):
-                cap = cv2.VideoCapture(url)
-                if cap.isOpened():
-                    print("✓ IP webcam opened successfully.")
-                    return cap
+
+            cap, working_url = _open_ip_camera(url)
+            if cap is not None:
+                print(f"✓ IP webcam opened successfully: {working_url}")
+                return cap
+
             print("✗ Could not connect to IP camera.")
+            print("Tip: for Android IP Webcam, use: http://<phone-ip>:8080/video")
         else:
             print("Invalid choice, try again.")
 
@@ -173,6 +270,10 @@ def handle_add_new_face():
             embedding, _ = extract_embedding(frame)
 
         elif source_choice == "2":
+            if not CV2_GUI_AVAILABLE:
+                _print_gui_fix_hint()
+                return False
+
             cap = choose_video_source()
             print(
                 f"Press 's' to save face ({photos_added + 1}/{MAX_PHOTOS_PER_STUDENT}) or 'q' to finish."
@@ -271,6 +372,10 @@ def add_images_for_existing_student():
             embedding, _ = extract_embedding(frame)
 
         elif source_choice == "2":
+            if not CV2_GUI_AVAILABLE:
+                _print_gui_fix_hint()
+                return False
+
             cap = choose_video_source()
             print(
                 f"Press 's' to save face ({added + 1}/{remaining_slots}) or 'q' to cancel."
@@ -571,6 +676,11 @@ def start_timer_based_attendance():
     # Step 7: Start video capture
     video_capture = choose_video_source()
 
+    if not CV2_GUI_AVAILABLE:
+        _print_gui_fix_hint()
+        video_capture.release()
+        return
+
     # Step 8: Display session info
     print("\n" + "=" * 70)
     print("TIMER-BASED ATTENDANCE SESSION STARTED")
@@ -774,7 +884,11 @@ while True:
     print("q. Quit")
     print("=" * 70)
 
-    choice = input("Enter your choice: ").strip()
+    try:
+        choice = input("Enter your choice: ").strip()
+    except KeyboardInterrupt:
+        print("\nProgram interrupted by user.")
+        sys.exit(0)
 
     if choice == "1":
         if handle_add_new_face():

@@ -1,5 +1,60 @@
 import cv2
-import time
+from urllib.parse import urlparse, urlunparse
+
+
+def build_camera_url_candidates(raw_url):
+    """Generate likely stream URLs for common IP camera apps."""
+    raw_url = raw_url.strip()
+    if not raw_url:
+        return []
+
+    if "://" not in raw_url:
+        raw_url = f"http://{raw_url}"
+
+    parsed = urlparse(raw_url)
+    normalized = parsed._replace(params="", fragment="")
+
+    candidates = [urlunparse(normalized)]
+
+    if normalized.path.strip("/") == "":
+        base = urlunparse(normalized._replace(path="", query="")).rstrip("/")
+        candidates.extend(
+            [
+                f"{base}/video",
+                f"{base}/mjpeg",
+                f"{base}/stream",
+                f"{base}/?action=stream",
+                f"{base}/shot.jpg",
+            ]
+        )
+
+    unique_candidates = []
+    seen = set()
+    for candidate in candidates:
+        if candidate not in seen:
+            unique_candidates.append(candidate)
+            seen.add(candidate)
+
+    return unique_candidates
+
+
+def try_open_capture(source, max_reads=25):
+    """Open a source and verify at least one frame can be read."""
+    video_capture = cv2.VideoCapture(source)
+    if not video_capture.isOpened():
+        video_capture.release()
+        return None
+
+    video_capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+    video_capture.set(cv2.CAP_PROP_FPS, 30)
+
+    for _ in range(max_reads):
+        ret, frame = video_capture.read()
+        if ret and frame is not None:
+            return video_capture
+
+    video_capture.release()
+    return None
 
 
 def connect_to_wireless_camera(camera_url):
@@ -9,22 +64,16 @@ def connect_to_wireless_camera(camera_url):
     print(f"Connecting to wireless camera: {camera_url}")
 
     try:
-        # Try to connect with OpenCV
-        video_capture = cv2.VideoCapture(camera_url)
+        for candidate_url in build_camera_url_candidates(camera_url):
+            print(f"Trying: {candidate_url}")
+            video_capture = try_open_capture(candidate_url)
+            if video_capture is not None:
+                print(f"✓ Camera connected successfully! ({candidate_url})")
+                return video_capture
 
-        # Set properties for better streaming
-        video_capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-        video_capture.set(cv2.CAP_PROP_FPS, 30)
-
-        # Test if connection works
-        ret, frame = video_capture.read()
-        if ret and frame is not None:
-            print("✓ Camera connected successfully!")
-            return video_capture
-        else:
-            print("✗ Could not read frame from camera")
-            video_capture.release()
-            return None
+        print("✗ Could not read frame from camera")
+        print("Tip: for Android IP Webcam, use: http://<phone-ip>:8080/video")
+        return None
 
     except Exception as e:
         print(f"✗ Connection failed: {e}")
