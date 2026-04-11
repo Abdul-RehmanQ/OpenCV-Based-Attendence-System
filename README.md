@@ -1,55 +1,63 @@
-# OpenCV-Based Attendance System
+# Distributed Multi-Camera Facial Recognition & Real-Time Attendance Tracking System
 
-A real-time facial recognition attendance system built with Python, OpenCV, and InsightFace (RetinaFace + ArcFace). The system detects and recognizes student faces via webcam or IP camera, logs timed attendance sessions, and manages class enrollments through a terminal-based interface, with local JSON storage (no MySQL server required).
+A real-time attendance platform with a **FastAPI backend** and **React dashboard** for managing students, classes, camera feeds, and timer-based attendance sessions using facial recognition (InsightFace RetinaFace + ArcFace).
 
 ---
 
-## Features
+## What's New (Latest Updates)
 
-- Face enrollment from image files or live webcam capture (up to 5 photos per student)
-- High-accuracy face detection and recognition using RetinaFace + ArcFace (InsightFace `buffalo_l` model)
-- Cosine similarity-based identity matching with configurable threshold
+- Migrated from CLI-based app to a unified **FastAPI API server** (`main.py`)
+- Added **React admin dashboard** (`frontend/`) replacing the terminal interface
+- Added dedicated **Classes management page**
+- Added **dynamic recognition threshold slider** in Settings
+- Introduced **multi-camera manager** with stream/session linking and live MJPEG feed endpoint
+- Removed legacy standalone scripts (`api.py`, `recognition.py`, `wireless_recognition.py`, `wireless_cam.py`, `new_model.py`, `db.py`, `project.sql`)
+
+---
+
+## Core Features
+
+- Student registration with face embedding extraction (up to 5 photos per student; more photos improve accuracy across varied lighting and angles)
+- Class creation and student enrollment workflows with department/batch filtering
 - Timer-based attendance sessions with on-time / late classification
-- 80% minimum presence threshold for marking attendance
-- Class creation and student enrollment management
-- Support for laptop webcam and IP/wireless cameras
-- Real-time bounding box overlay with recognition confidence scores
-- Local file-based persistence via `storage.py` (`local_data/attendance_data.json`)
+- 80% minimum presence threshold for marking a student present
+- Multi-camera feed registration and per-session camera linking
+- Live MJPEG video feed endpoint for active cameras
+- Configurable recognition threshold at runtime (default: `0.6` cosine similarity — lower to increase strictness, raise to increase permissiveness)
+- Local JSON persistence — no database server required
 
 ---
 
-## Technologies Used
+## Tech Stack
 
 | Component | Library / Tool |
 |---|---|
 | Face Detection | InsightFace (RetinaFace) |
 | Face Recognition | InsightFace (ArcFace – `buffalo_l`) |
 | Video Capture | OpenCV (`opencv-python`) |
-| Inference Runtime | ONNX Runtime |
+| Inference Runtime | ONNX Runtime (CPU by default; GPU requires CUDA + ONNX Runtime GPU package) |
+| Backend | FastAPI, Uvicorn |
+| Frontend | React (Vite), React Router, Tailwind CSS, Lucide Icons |
 | Storage | Local JSON file (`local_data/attendance_data.json`) |
 | Numerical Computing | NumPy |
-| HTTP / IP Camera | Requests |
-| Web Interface (optional) | Flask |
-| Image Processing | Pillow |
 
 ---
 
 ## Project Structure
 
-```
-OpenCV-Based-Attendence-System/
-├── main.py                  # Entry point – CLI menu, enrollment, attendance session logic
-├── storage.py               # Local JSON storage backend used by main.py
-├── db.py                    # Legacy MySQL backend (optional/legacy)
-├── recognition.py           # Standalone recognition script (webcam)
-├── new_model.py             # Model experimentation / alternative recognition pipeline
-├── wireless_cam.py          # IP/wireless camera stream handler
-├── wireless_recognition.py  # Recognition via wireless camera feed
-├── project.sql              # MySQL schema – tables for students, classes, sessions, attendance
-├── local_data/              # Auto-created local storage directory
-├── my_face.jpg              # Sample enrollment image
-├── requirements.txt         # Python dependency list
-└── .gitignore
+```text
+Distributed-Multi-Camera-Facial-Recognition-and-Real-Time-Attendance-Tracking-System/
+├── main.py                   # FastAPI app — all API routes and recognition session logic
+├── camera_manager.py         # Multi-camera stream and session linking
+├── storage.py                # Local JSON storage backend
+├── requirements.txt
+├── README.md
+└── frontend/
+    ├── package.json
+    └── src/
+        ├── App.jsx
+        ├── layouts/
+        └── pages/
 ```
 
 ---
@@ -58,17 +66,18 @@ OpenCV-Based-Attendence-System/
 
 ### Prerequisites
 
-- Python 3.9 or 3.10 (recommended; InsightFace and ONNX Runtime have version constraints)
+- Python 3.9 or 3.10 (InsightFace and ONNX Runtime have version constraints)
+- Node.js (for the React frontend)
 - A working webcam or IP camera
 
-### 1. Clone the Repository
+### 1. Clone
 
 ```bash
-git clone https://github.com/Abdul-RehmanQ/OpenCV-Based-Attendence-System.git
-cd OpenCV-Based-Attendence-System
+git clone https://github.com/Abdul-RehmanQ/Distributed-Multi-Camera-Facial-Recognition-and-Real-Time-Attendance-Tracking-System.git
+cd Distributed-Multi-Camera-Facial-Recognition-and-Real-Time-Attendance-Tracking-System
 ```
 
-### 2. Create and Activate a Virtual Environment
+### 2. Backend Setup
 
 ```bash
 python -m venv venv
@@ -78,91 +87,92 @@ venv\Scripts\activate
 
 # macOS / Linux
 source venv/bin/activate
-```
 
-### 3. Install Dependencies
-
-```bash
 pip install -r requirements.txt
 ```
 
-> **Note:** `dlib-bin` and `cmake` may require Visual Studio Build Tools on Windows. Install them from [https://visualstudio.microsoft.com/visual-cpp-build-tools/](https://visualstudio.microsoft.com/visual-cpp-build-tools/) before running pip install.
+> **Windows note:** `dlib-bin` and `cmake` may require Visual Studio Build Tools. Install from [https://visualstudio.microsoft.com/visual-cpp-build-tools/](https://visualstudio.microsoft.com/visual-cpp-build-tools/) before running `pip install`.
 
-### 4. Download InsightFace Model
+### 3. Frontend Setup
 
-The `buffalo_l` model is downloaded automatically on first run via InsightFace's model zoo. Ensure internet access is available during the first launch. The model is cached locally after the initial download.
+```bash
+cd frontend
+npm install
+```
+
+### 4. InsightFace Model
+
+The `buffalo_l` model downloads automatically on first backend startup via InsightFace's model zoo. Internet access is required for the initial download. The model is cached locally after that.
 
 ---
 
-## Usage
+## Running the App
 
-### Run the Application
+### Start Backend (port 8000)
 
 ```bash
+# from repo root
 python main.py
+# or
+uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 ```
 
-The system loads the face recognition model and presents a terminal menu:
+### Start Frontend (Vite dev server)
 
-```
-======================================================================
-FACE RECOGNITION ATTENDANCE SYSTEM
-======================================================================
-1. Add a new student
-2. Add images for existing student
-3. List all students
-4. Create a new class
-5. Enroll students in a class
-6. View class enrollments
-7. Start Timer-Based Attendance
-q. Quit
-======================================================================
+```bash
+cd frontend
+npm run dev
 ```
 
-### Enrollment Workflow
+Open the URL shown by Vite (typically `http://localhost:5173`). The frontend targets the backend at `http://localhost:8000`.
 
-1. Select **Option 1** to register a new student (requires roll number, name, and up to 5 face photos).
-2. Photos can be provided as image file paths or captured live via webcam.
-3. Select **Option 4** to create a class (name, course code, department, batch, semester, instructor).
-4. Select **Option 5** to enroll students in a class. Eligible students must have face photos and match the target department and batch.
+---
 
-### Running an Attendance Session
+## Key API Endpoints
 
-1. Select **Option 7**.
-2. Choose a class from the listed classes.
-3. Set session duration (seconds) and the late-arrival threshold (seconds).
-4. Select a video source (webcam index `0` or IP camera URL).
-5. The system runs face recognition in real time, logs detections every second, and displays a countdown timer with per-frame confidence scores.
-6. Press `q` to end the session early or wait for the timer to expire.
-7. Attendance is finalized automatically: students detected for ≥80% of session duration are marked present; those arriving after the late threshold are marked late.
+| Method | Endpoint | Purpose |
+|---|---|---|
+| GET | `/api/stats` | Dashboard summary stats |
+| GET / POST | `/api/settings` | Read / update system settings (including recognition threshold) |
+| GET / POST | `/api/students` | List students / register new student |
+| GET / POST | `/api/classes` | List classes / create class |
+| GET | `/api/classes/{class_id}/enrollments` | List enrolled students |
+| POST | `/api/classes/{class_id}/enroll` | Enroll a student |
+| DELETE | `/api/classes/{class_id}/enrollments/{rollnumber}` | Remove enrollment |
+| POST | `/api/sessions/start` | Start an attendance session |
+| POST | `/api/sessions/{session_id}/finalize` | Finalize and compute attendance |
+| GET | `/api/records` | Retrieve attendance records |
+| GET / POST / DELETE | `/api/cameras...` | Camera registration and management |
+| GET | `/api/video_feed/{camera_id}` | Live MJPEG stream for a camera |
 
-### Wireless / IP Camera
+---
 
-Use `wireless_cam.py` for camera-only stream testing, or select the IP camera option within `main.py` and provide the stream URL (e.g., `http://192.168.1.x:8080/video`).
+## Attendance Session Behavior
+
+- Sessions are timer-based with a configurable duration and late-arrival threshold (both in seconds).
+- Face recognition runs in real time; detections are logged per second with confidence scores.
+- Students detected for ≥80% of the session duration are marked **present**.
+- Students first detected after the late threshold are marked **late**.
+- Sessions finalize automatically at timer expiry or via the `/finalize` endpoint.
 
 ---
 
 ## Data Storage
 
-This workspace is already configured for database-free mode in `main.py`.
+All data is persisted locally in `local_data/attendance_data.json` (created automatically on first run). This includes students, classes, enrollments, sessions, detection events, attendance records, and system settings.
 
-- Student, class, session, and attendance data are stored in `local_data/attendance_data.json`.
-- The file and folder are created automatically on first run.
-- No MySQL setup and no localhost DB credentials are required.
-
-If you still want MySQL mode later, `db.py`, `project.sql`, and legacy scripts (`recognition.py`, `wireless_recognition.py`, `new_model.py`) are kept as references.
+No MySQL setup or database credentials are required. The legacy `db.py` and `project.sql` files have been removed.
 
 ---
 
 ## Notes
 
-- The recognition threshold is set to `0.6` cosine similarity. Lower this value to increase strictness; raise it to be more permissive.
-- A maximum of 5 photos per student is enforced. More photos improve recognition accuracy under varied lighting and angles.
-- The `buffalo_l` InsightFace model runs on CPU by default (`CPUExecutionProvider`). GPU acceleration requires CUDA and the appropriate ONNX Runtime GPU package.
-- The `project.sql` file and `db.py` are legacy MySQL artifacts and are not required for `main.py` in this setup.
+- InsightFace model initialization runs on backend startup; first startup takes longer due to model loading.
+- `requirements.txt` may include some legacy dependencies from earlier versions of the project.
+- GPU acceleration requires CUDA and the `onnxruntime-gpu` package in place of `onnxruntime`.
 
 ---
 
 ## License
 
-This project does not currently specify a license. All rights reserved by the author unless otherwise stated.
+No license is currently specified. All rights reserved by the author unless otherwise stated.
