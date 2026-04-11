@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { Outlet, NavLink } from 'react-router-dom';
-import { LayoutDashboard, UserPlus, BrainCircuit, ScanFace, Database, Settings, Sun, Moon, Bell } from 'lucide-react';
+import { LayoutDashboard, UserPlus, BrainCircuit, ScanFace, Database, Settings, Sun, Moon, Bell, BookOpen } from 'lucide-react';
 import { cn } from '../lib/utils';
 
 export default function DashboardLayout() {
@@ -23,6 +23,7 @@ export default function DashboardLayout() {
     { to: "/train", icon: BrainCircuit, label: "Train Model" },
     { to: "/capture", icon: ScanFace, label: "Take Attendance" },
     { to: "/records", icon: Database, label: "Records" },
+    { to: "/classes", icon: BookOpen, label: "Classes" },
     { to: "/settings", icon: Settings, label: "Settings" }
   ];
 

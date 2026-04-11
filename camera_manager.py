@@ -5,7 +5,12 @@ import numpy as np
 import insightface
 import storage
 
-RECOGNITION_THRESHOLD = 0.6
+RECOGNITION_THRESHOLD = storage.get_system_settings().get("recognition_threshold", 0.6)
+
+def update_recognition_threshold(value):
+    global RECOGNITION_THRESHOLD
+    RECOGNITION_THRESHOLD = float(value)
+    storage.update_system_settings({"recognition_threshold": float(value)})
 
 def cosine_similarity(a, b):
     return np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b))
@@ -124,8 +129,8 @@ class MultiCameraManager:
         self.cameras = {}
         print("Loading Shared InsightFace Model for multi-cam tracking...")
         try:
-            self.face_app = insightface.app.FaceAnalysis(name="buffalo_l", providers=["CPUExecutionProvider"])
-            self.face_app.prepare(ctx_id=0, det_size=(640, 640))
+            self.face_app = insightface.app.FaceAnalysis(name="buffalo_l", providers=["CUDAExecutionProvider", "CPUExecutionProvider"])
+            self.face_app.prepare(ctx_id=0, det_size=(320, 320))
         except Exception as e:
             print(f"Manager face model failed to load: {e}")
             self.face_app = None

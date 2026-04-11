@@ -5,6 +5,7 @@ export default function Settings() {
   const [cameras, setCameras] = useState([]);
   const [newCamId, setNewCamId] = useState('');
   const [newCamUrl, setNewCamUrl] = useState('');
+  const [threshold, setThreshold] = useState(60);
   
   const fetchCameras = () => {
     fetch('http://localhost:8000/api/cameras')
@@ -12,9 +13,32 @@ export default function Settings() {
       .then(data => setCameras(data.cameras || []));
   };
 
+  const fetchSettings = () => {
+    fetch('http://localhost:8000/api/settings')
+      .then(res => res.json())
+      .then(data => {
+        if (data.recognition_threshold !== undefined) {
+          setThreshold(Math.round(data.recognition_threshold * 100));
+        }
+      });
+  };
+
   useEffect(() => {
     fetchCameras();
+    fetchSettings();
   }, []);
+
+  const saveThreshold = async (val) => {
+    try {
+      await fetch('http://localhost:8000/api/settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ recognition_threshold: val / 100 })
+      });
+    } catch (err) {
+      console.error('Failed to save threshold', err);
+    }
+  };
 
   const addCamera = async (e) => {
     e.preventDefault();
@@ -112,10 +136,19 @@ export default function Settings() {
             </div>
             <div className="p-6">
               <div className="flex items-center justify-between mb-2">
-                <span className="text-sm font-medium dark:text-slate-300">0.60 (Strict)</span>
+                <span className="text-sm font-medium dark:text-slate-300">{(threshold / 100).toFixed(2)} (Strict)</span>
               </div>
-              <input type="range" min="0" max="100" defaultValue="60" className="w-full accent-primary" />
-              <p className="text-xs text-slate-500 mt-3">Higher threshold prevents false positives but may reject slight facial variations. Currently set via backend const.</p>
+              <input 
+                 type="range" 
+                 min="0" 
+                 max="100" 
+                 value={threshold} 
+                 onChange={e => setThreshold(parseInt(e.target.value))}
+                 onMouseUp={e => saveThreshold(parseInt(e.target.value))}
+                 onTouchEnd={e => saveThreshold(parseInt(e.target.value))}
+                 className="w-full accent-primary" 
+              />
+              <p className="text-xs text-slate-500 mt-3">Higher threshold prevents false positives but may reject slight facial variations. Saved automatically.</p>
             </div>
           </div>
 

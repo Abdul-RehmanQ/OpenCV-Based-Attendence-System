@@ -661,3 +661,19 @@ def get_detection_count(session_id):
         for event in data["detection_events"]
         if int(event.get("session_id")) == int(session_id)
     )
+
+# ============================================
+# SYSTEM SETTINGS
+# ============================================
+
+def get_system_settings():
+    data = _load_data()
+    return {
+        "recognition_threshold": data["meta"].get("recognition_threshold", 0.6)
+    }
+
+def update_system_settings(settings):
+    data = _load_data()
+    if "recognition_threshold" in settings:
+        data["meta"]["recognition_threshold"] = float(settings["recognition_threshold"])
+    _save_data(data)

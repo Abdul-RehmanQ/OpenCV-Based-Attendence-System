@@ -8,6 +8,7 @@ import Capture from './pages/Capture';
 import Records from './pages/Records';
 import Settings from './pages/Settings';
 import Landing from './pages/Landing';
+import Classes from './pages/Classes';
 
 function App() {
   return (
@@ -21,6 +22,7 @@ function App() {
           <Route path="train" element={<TrainModel />} />
           <Route path="capture" element={<Capture />} />
           <Route path="records" element={<Records />} />
+          <Route path="classes" element={<Classes />} />
           <Route path="settings" element={<Settings />} />
         </Route>
         
